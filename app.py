@@ -27,11 +27,48 @@ def extract_video_id(youtube_url):
     
     return None
 
+import random
+import time
+
+# Tambahkan di bagian atas file
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0'
+]
+
+def get_random_headers():
+    return {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0'
+    }
+
+# Update fungsi get_youtube_transcript
 def get_youtube_transcript(video_id, languages=['id', 'en']):
-    """
-    Get transcript from YouTube video
-    """
     try:
+        # Tambahkan delay random
+        time.sleep(random.uniform(0.5, 2.0))
+        
+        # Monkey patch requests dengan headers
+        original_get = requests.get
+        def patched_get(url, **kwargs):
+            if 'headers' not in kwargs:
+                kwargs['headers'] = {}
+            kwargs['headers'].update(get_random_headers())
+            return original_get(url, **kwargs)
+        
+        requests.get = patched_get
+        
         # Try to get transcript
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
@@ -81,6 +118,31 @@ def get_youtube_transcript(video_id, languages=['id', 'en']):
             'error': str(e),
             'transcript': None
         }
+
+import time
+from functools import wraps
+
+# Rate limiting decorator
+def rate_limit(calls_per_minute=30):
+    min_interval = 60.0 / calls_per_minute
+    last_called = [0.0]
+    
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            elapsed = time.time() - last_called[0]
+            left_to_wait = min_interval - elapsed
+            if left_to_wait > 0:
+                time.sleep(left_to_wait)
+            ret = func(*args, **kwargs)
+            last_called[0] = time.time()
+            return ret
+        return wrapper
+    return decorator
+
+@rate_limit(calls_per_minute=20)  # Maksimal 20 calls per menit
+def get_youtube_transcript_with_rate_limit(video_id, languages=['id', 'en']):
+    return get_youtube_transcript(video_id, languages)
 
 @app.route('/api/chapters/transcript', methods=['GET'])
 def get_chapters_with_transcript():
@@ -301,3 +363,120 @@ def health_check():
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=4000)
+
+
+import json
+import os
+from datetime import datetime, timedelta
+
+# Simple file-based caching
+CACHE_DIR = 'transcript_cache'
+CACHE_DURATION = 24 * 60 * 60  # 24 jam
+
+def ensure_cache_dir():
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+
+def get_cache_path(video_id):
+    return os.path.join(CACHE_DIR, f"{video_id}.json")
+
+def get_cached_transcript(video_id):
+    cache_path = get_cache_path(video_id)
+    if os.path.exists(cache_path):
+        # Cek apakah cache masih valid
+        cache_time = os.path.getmtime(cache_path)
+        if time.time() - cache_time < CACHE_DURATION:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    return None
+
+def save_transcript_cache(video_id, transcript):
+    ensure_cache_dir()
+    cache_path = get_cache_path(video_id)
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        json.dump(transcript, f, ensure_ascii=False, indent=2)
+
+def get_youtube_transcript_cached(video_id, languages=['id', 'en']):
+    # Cek cache dulu
+    cached = get_cached_transcript(video_id)
+    if cached:
+        return cached
+    
+    # Ambil dari YouTube jika tidak ada cache
+    transcript = get_youtube_transcript_with_rate_limit(video_id, languages)
+    
+    # Simpan ke cache
+    save_transcript_cache(video_id, transcript)
+    
+    return transcript
+
+
+## 4. **Multiple Fallback Strategies**
+def get_youtube_transcript_with_fallback(video_id, languages=['id', 'en']):
+    strategies = [
+        # Strategy 1: Normal dengan headers
+        lambda: get_youtube_transcript_cached(video_id, languages),
+        
+        # Strategy 2: Dengan delay lebih lama
+        lambda: (time.sleep(5), get_youtube_transcript(video_id, languages))[1],
+        
+        # Strategy 3: Hanya bahasa Inggris
+        lambda: get_youtube_transcript(video_id, ['en']),
+        
+        # Strategy 4: Auto-generated transcript
+        lambda: YouTubeTranscriptApi.get_transcript(video_id, languages=['en'], 
+                                                   preserve_formatting=True)
+    ]
+    
+    for i, strategy in enumerate(strategies):
+        try:
+            print(f"Trying strategy {i+1}...")
+            result = strategy()
+            print(f"Strategy {i+1} succeeded")
+            return result
+        except Exception as e:
+            print(f"Strategy {i+1} failed: {str(e)}")
+            if i < len(strategies) - 1:
+                # Exponential backoff
+                wait_time = (2 ** i) * random.uniform(1, 3)
+                print(f"Waiting {wait_time:.1f}s before next strategy...")
+                time.sleep(wait_time)
+            continue
+    
+    raise Exception("All fallback strategies failed")
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Global session dengan retry strategy
+session = requests.Session()
+retry_strategy = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+)
+adapter = HTTPAdapter(max_retries=retry_strategy)
+session.mount("http://", adapter)
+session.mount("https://", adapter)
+
+def setup_session_headers():
+    session.headers.update(get_random_headers())
+
+# Update monkey patch untuk menggunakan session
+def patch_requests_with_session():
+    original_get = requests.get
+    original_post = requests.post
+    
+    def patched_get(url, **kwargs):
+        setup_session_headers()
+        return session.get(url, **kwargs)
+    
+    def patched_post(url, **kwargs):
+        setup_session_headers()
+        return session.post(url, **kwargs)
+    
+    requests.get = patched_get
+    requests.post = patched_post
+    
+    return original_get, original_post
