@@ -2,7 +2,8 @@ from flask import Flask, jsonify, request
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
 import re
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
+import base64
 
 app = Flask(__name__)
 
@@ -184,6 +185,115 @@ def get_transcript_from_url():
         return jsonify(result)
     else:
         return jsonify(result), 400
+
+@app.route('/api/transcript/url/<path:encoded_url>', methods=['GET'])
+def get_transcript_from_url_param(encoded_url):
+    try:
+        # Decode base64 URL
+        try:
+            decoded_url = base64.b64decode(encoded_url).decode('utf-8')
+        except:
+            # Jika bukan base64, coba decode URL biasa
+            decoded_url = unquote(encoded_url)
+        
+        # Extract video ID
+        video_id = extract_video_id(decoded_url)
+        
+        if not video_id:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid YouTube URL',
+                'provided_url': decoded_url
+            }), 400
+        
+        # Get languages from query parameters
+        languages = request.args.getlist('lang') or ['id', 'en']
+        
+        # Get transcript
+        result = get_youtube_transcript(video_id, languages)
+        
+        # Add original URL info to response
+        result['original_url'] = decoded_url
+        result['video_id'] = video_id
+        
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Error processing URL: {str(e)}',
+            'provided_encoded_url': encoded_url
+        }), 500
+
+@app.route('/api/transcript/direct', methods=['GET'])
+def get_transcript_direct():
+    """
+    Get transcript from YouTube URL passed as query parameter
+    Lebih mudah digunakan tanpa perlu encoding
+    
+    Contoh penggunaan:
+    GET /api/transcript/direct?url=https://youtu.be/f9cwrjDGOHo?si=vmEWMvEMsMC6yWlB
+    """
+    youtube_url = request.args.get('url')
+    
+    if not youtube_url:
+        return jsonify({
+            'success': False,
+            'error': 'YouTube URL parameter is required',
+            'usage': 'GET /api/transcript/direct?url=YOUTUBE_URL'
+        }), 400
+    
+    # Extract video ID
+    video_id = extract_video_id(youtube_url)
+    
+    if not video_id:
+        return jsonify({
+            'success': False,
+            'error': 'Invalid YouTube URL',
+            'provided_url': youtube_url
+        }), 400
+    
+    # Get languages from query parameters
+    languages = request.args.getlist('lang') or ['id', 'en']
+    
+    # Get transcript
+    result = get_youtube_transcript(video_id, languages)
+    
+    # Add original URL info to response
+    result['original_url'] = youtube_url
+    result['video_id'] = video_id
+    
+    if result['success']:
+        return jsonify(result)
+    else:
+        return jsonify(result), 400
+
+# Helper endpoint untuk encoding URL
+@app.route('/api/encode-url', methods=['POST'])
+def encode_youtube_url():
+    """
+    Helper endpoint untuk encode YouTube URL ke base64
+    """
+    data = request.get_json()
+    
+    if not data or 'url' not in data:
+        return jsonify({
+            'success': False,
+            'error': 'URL is required'
+        }), 400
+    
+    url = data['url']
+    encoded_url = base64.b64encode(url.encode('utf-8')).decode('utf-8')
+    
+    return jsonify({
+        'success': True,
+        'original_url': url,
+        'encoded_url': encoded_url,
+        'usage_example': f'/api/transcript/url/{encoded_url}'
+    })
 
 @app.route('/health', methods=['GET'])
 def health_check():
